@@ -1,5 +1,5 @@
 const dns = require("dns");
-// Explicit DNS resolution targeting to sweep past persistent local Windows ISP lookup blocks
+
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
 
 const express = require("express");
@@ -10,7 +10,7 @@ require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 5000;
 
-// Rigidly bound Cross-Origin access points to allow secure front-to-back network token transfers
+
 app.use(cors({
   origin: process.env.CLIENT_URL,
   credentials: true
@@ -28,7 +28,7 @@ const client = new MongoClient(uri, {
 
 async function runServer() {
   try {
-    
+   
     await client.connect();
     console.log(" Successfully linked local server to MongoDB Cluster!");
 
@@ -41,7 +41,6 @@ async function runServer() {
       res.send("IdeaVault Node API is running smoothly...");
     });
 
-    
     app.get("/ideas/trending", async (req, res) => {
       try {
         const trendingideas = await ideacollection
@@ -56,6 +55,37 @@ async function runServer() {
       }
     });
 
+    
+    app.get("/ideas", async (req, res) => {
+      try {
+        const { search, category } = req.query;
+        let databaseQueryFilter = {};
+
+       
+        if (search) {
+          databaseQueryFilter.ideaTitle = { $regex: search, $options: "i" };
+        }
+
+        
+        if (category && category !== "All") {
+          databaseQueryFilter.category = category;
+        }
+
+        
+        const matchedIdeas = await ideacollection
+          .find(databaseQueryFilter)
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        
+        res.json(matchedIdeas); 
+        
+      } catch (error) {
+        console.error("Failed to query records from storage core:", error);
+        res.status(500).json({ success: false, message: "Internal server read failure.", error });
+      }
+    });
+    
     
     app.post("/ideas", async (req, res) => {
       try {
@@ -94,6 +124,11 @@ async function runServer() {
       }
     });
 
+    
+    app.listen(port, () => {
+      console.log(`🚀 IdeaVault Express server active on local port: ${port}`);
+    });
+
   } catch (error) {
     console.error(" Database connection structural failure:", error);
   }
@@ -101,7 +136,3 @@ async function runServer() {
 
 
 runServer().catch(console.dir);
-
-app.listen(port, () => {
-  console.log(` IdeaVault Express server active on local port: ${port}`);
-});
