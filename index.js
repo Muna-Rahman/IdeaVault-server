@@ -67,6 +67,73 @@ async function runServer() {
       }
     });
 
+    app.get("/ideas/user/:email", async (req, res) => {
+      try {
+        const userEmail = req.params.email;
+        const userIdeas = await ideacollection
+          .find({ userEmail: userEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(userIdeas);
+      } catch (error) {
+        res.status(500).json({ success: false, message: "Failed to fetch profile items." });
+      }
+    });
+
+    app.get("/user-interactions/:email", async (req, res) => {
+      try {
+        const userEmail = req.params.email;
+        
+        const interactionComments = await commentcollection
+          .find({ userEmail: userEmail })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        const uniqueIdeaIds = [...new Set(interactionComments.map(c => c.ideaId))];
+
+        const { ObjectId } = require("mongodb");
+        const objectIds = uniqueIdeaIds
+          .filter(id => {
+            try {
+              return id && ObjectId.isValid(id);
+            } catch (e) {
+              return false;
+            }
+          })
+          .map(id => new ObjectId(id));
+
+        let associatedIdeas = [];
+        if (objectIds.length > 0) {
+          associatedIdeas = await ideacollection
+            .find({ _id: { $in: objectIds } })
+            .toArray();
+        }
+
+        const compiledInteractions = associatedIdeas.map(idea => {
+          const matchingComments = interactionComments
+            .filter(c => String(c.ideaId) === String(idea._id))
+            .map(c => ({
+              commentId: c._id,
+              commentText: c.commentText,
+              createdAt: c.createdAt
+            }));
+
+          return {
+            _id: idea._id,
+            ideaTitle: idea.ideaTitle,
+            category: idea.category,
+            shortDescription: idea.shortDescription,
+            userComments: matchingComments
+          };
+        });
+
+        res.json(compiledInteractions);
+      } catch (error) {
+        console.error("Interaction aggregation crash:", error);
+        res.status(500).json({ success: false, message: "Internal tracker compilation breakdown." });
+      }
+    });
+
     app.get("/ideas", async (req, res) => {
       try {
         const { search, category } = req.query;
@@ -99,6 +166,7 @@ async function runServer() {
 
         const customIdeaDocument = {
           ideaTitle: payloadData.title || payloadData.ideaTitle, 
+          userEmail: payloadData.userEmail,
           category: payloadData.category || "Tech",
           shortDescription: payloadData.shortDescription,
           detailedDescription: payloadData.detailedDescription,
@@ -126,6 +194,58 @@ async function runServer() {
           message: "Internal framework failed to write document context record safely.", 
           error 
         });
+      }
+    });
+
+    app.put("/ideas/:id", async (req, res) => {
+      try {
+        const { ObjectId } = require("mongodb");
+        const ideaId = req.params.id;
+        const updatedFields = req.body;
+
+        const modificationPayload = {
+          ideaTitle: updatedFields.ideaTitle,
+          category: updatedFields.category,
+          shortDescription: updatedFields.shortDescription,
+          detailedDescription: updatedFields.detailedDescription,
+          imageUrl: updatedFields.imageUrl,
+          estimatedBudget: updatedFields.estimatedBudget ? Number(updatedFields.estimatedBudget) : null,
+          targetAudience: updatedFields.targetAudience,
+          problemStatement: updatedFields.problemStatement,
+          proposedSolution: updatedFields.proposedSolution,
+          updatedAt: new Date()
+        };
+
+        const updateResult = await ideacollection.updateOne(
+          { _id: new ObjectId(ideaId) },
+          { $set: modificationPayload }
+        );
+
+        if (updateResult.matchedCount === 0) {
+          return res.status(404).json({ success: false, message: "Document missing from database." });
+        }
+        res.json({ success: true, message: "Concept blueprint record rewritten cleanly." });
+      } catch (error) {
+        res.status(500).json({ success: false, message: "Operational transaction crash on PUT update query hook." });
+      }
+    });
+
+    app.delete("/ideas/:id", async (req, res) => {
+      try {
+        const { ObjectId } = require("mongodb");
+        const ideaId = req.params.id;
+
+        const deleteResult = await ideacollection.deleteOne({ _id: new ObjectId(ideaId) });
+        
+        if (deleteResult.deletedCount === 0) {
+          return res.status(404).json({ success: false, message: "Target document not found." });
+        }
+
+        await commentcollection.deleteMany({ ideaId: ideaId });
+
+        res.json({ success: true, message: "Concept and related conversation tracks purged successfully from disk." });
+      } catch (error) {
+        res.status(500).json({ success: false, message: "Purge transaction dropped internally." });
       }
     });
 
@@ -183,7 +303,6 @@ async function runServer() {
       }
     });
 
-    
     app.delete("/comments/:commentId", async (req, res) => {
       try {
         const { ObjectId } = require("mongodb");
