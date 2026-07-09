@@ -54,7 +54,7 @@ async function connectToDatabase() {
   return { ideacollection, commentcollection };
 }
 
-// Global root health check route
+
 app.get("/", (req, res) => {
   res.send("IdeaVault Node API is running smoothly...");
 });
