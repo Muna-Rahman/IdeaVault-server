@@ -27,36 +27,69 @@ app.use(
 );
 app.use(express.json());
 
+const { ObjectId } = require("mongodb");
+
 const uri = process.env.MONGODB_URI;
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
+
+// Cache the connection *promise* globally so concurrent serverless requests
+// share one connection attempt, and a failed attempt can be retried.
+let clientPromise = null;
+
+function getClientPromise() {
+  if (!uri) {
+    throw new Error("MONGODB_URI environment variable is not set.");
   }
-});
-
-// Cache database connections globally across serverless function invocations
-let dbInstance = null;
-let ideacollection = null;
-let commentcollection = null;
-
-async function connectToDatabase() {
-  if (dbInstance) return { ideacollection, commentcollection };
-  
-  await client.connect();
-  const database = client.db("ideavault");
-  ideacollection = database.collection("ideas");
-  commentcollection = database.collection("comments");
-  dbInstance = database;
-  
-  console.log("Successfully connected to MongoDB Cluster context!");
-  return { ideacollection, commentcollection };
+  if (!clientPromise) {
+    const client = new MongoClient(uri, {
+      serverApi: {
+        version: ServerApiVersion.v1,
+        strict: true,
+        deprecationErrors: true,
+      },
+      serverSelectionTimeoutMS: 8000,
+      connectTimeoutMS: 8000,
+      maxPoolSize: 5,
+    });
+    clientPromise = client.connect().catch((err) => {
+      clientPromise = null; // allow retry on next request
+      throw err;
+    });
+  }
+  return clientPromise;
 }
 
+async function connectToDatabase() {
+  const client = await getClientPromise();
+  const database = client.db(process.env.MONGODB_DB || "ideavault");
+  console.log("MongoDB connection ready.");
+  return {
+    ideacollection: database.collection("ideas"),
+    commentcollection: database.collection("comments"),
+  };
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Never leak raw Error objects (they serialize to {}) - send a readable message.
+function errMsg(error) {
+  return error && error.message ? error.message : String(error);
+}
 
 app.get("/", (req, res) => {
   res.send("IdeaVault Node API is running smoothly...");
+});
+
+// Quick DB connectivity check: GET /health
+app.get("/health", async (req, res) => {
+  try {
+    const { ideacollection } = await connectToDatabase();
+    const count = await ideacollection.estimatedDocumentCount();
+    res.json({ ok: true, db: "connected", ideas: count });
+  } catch (error) {
+    res.status(500).json({ ok: false, db: "failed", message: errMsg(error) });
+  }
 });
 
 // Trending Ideas Route
@@ -65,13 +98,13 @@ app.get("/ideas/trending", async (req, res) => {
     const { ideacollection } = await connectToDatabase();
     const trendingideas = await ideacollection
       .find()
-      .sort({ commentCount: -1 }) 
+      .sort({ commentCount: -1, createdAt: -1 })
       .limit(6)                  
       .toArray();                
     res.send(trendingideas);
   } catch (error) {
     console.error("Trending analytics extraction drop:", error);
-    res.status(500).send({ message: "Failed to load trending items", error });
+    res.status(500).send({ message: "Failed to load trending items", error: errMsg(error) });
   }
 });
 
@@ -79,9 +112,11 @@ app.get("/ideas/trending", async (req, res) => {
 app.get("/ideas/:id", async (req, res) => {
   try {
     const { ideacollection } = await connectToDatabase();
-    const { ObjectId } = require("mongodb");
     const singleId = req.params.id;
-    
+    if (!ObjectId.isValid(singleId)) {
+      return res.status(400).json({ success: false, message: "Invalid idea id." });
+    }
+
     const targetedIdea = await ideacollection.findOne({ _id: new ObjectId(singleId) });
     if (!targetedIdea) {
       return res.status(404).json({ success: false, message: "Concept document missing." });
@@ -120,7 +155,6 @@ app.get("/user-interactions/:email", async (req, res) => {
 
     const uniqueIdeaIds = [...new Set(interactionComments.map(c => c.ideaId))];
 
-    const { ObjectId } = require("mongodb");
     const objectIds = uniqueIdeaIds
       .filter(id => {
         try {
@@ -171,11 +205,13 @@ app.get("/ideas", async (req, res) => {
     let databaseQueryFilter = {};
 
     if (search) {
-      databaseQueryFilter.ideaTitle = { $regex: search, $options: "i" };
+      const escaped = escapeRegex(search);
+      databaseQueryFilter.ideaTitle = { $regex: escaped, $options: "i" };
     }
 
     if (category && category !== "All") {
-      databaseQueryFilter.category = category;
+      const escapedCat = escapeRegex(category);
+      databaseQueryFilter.category = { $regex: `^${escapedCat}$`, $options: "i" };
     }
 
     if (startDate || endDate) {
@@ -197,7 +233,7 @@ app.get("/ideas", async (req, res) => {
     
   } catch (error) {
     console.error("Failed to query records from storage core:", error);
-    res.status(500).json({ success: false, message: "Internal server read failure.", error });
+    res.status(500).json({ success: false, message: "Internal server read failure.", error: errMsg(error) });
   }
 });
 
@@ -235,7 +271,7 @@ app.post("/ideas", async (req, res) => {
     res.status(500).send({ 
       success: false, 
       message: "Internal framework failed to write document context record safely.", 
-      error 
+      error: errMsg(error)
     });
   }
 });
@@ -244,7 +280,6 @@ app.post("/ideas", async (req, res) => {
 app.put("/ideas/:id", async (req, res) => {
   try {
     const { ideacollection } = await connectToDatabase();
-    const { ObjectId } = require("mongodb");
     const ideaId = req.params.id;
     const updatedFields = req.body;
 
@@ -279,7 +314,6 @@ app.put("/ideas/:id", async (req, res) => {
 app.delete("/ideas/:id", async (req, res) => {
   try {
     const { ideacollection, commentcollection } = await connectToDatabase();
-    const { ObjectId } = require("mongodb");
     const ideaId = req.params.id;
 
     const deleteResult = await ideacollection.deleteOne({ _id: new ObjectId(ideaId) });
@@ -315,10 +349,13 @@ app.post("/comments", async (req, res) => {
   try {
     const { ideacollection, commentcollection } = await connectToDatabase();
     const { ideaId, userName, userEmail, commentText } = req.body;
-    const { ObjectId } = require("mongodb");
+
+    if (!ideaId || !ObjectId.isValid(ideaId)) {
+      return res.status(400).json({ success: false, message: "Invalid idea id." });
+    }
 
     const newCommentDoc = {
-      ideaId,
+      ideaId: String(ideaId),
       userName,
       userEmail,
       commentText,
@@ -342,7 +379,6 @@ app.post("/comments", async (req, res) => {
 app.patch("/comments/:commentId", async (req, res) => {
   try {
     const { commentcollection } = await connectToDatabase();
-    const { ObjectId } = require("mongodb");
     const { commentText } = req.body;
 
     await commentcollection.updateOne(
@@ -360,7 +396,6 @@ app.patch("/comments/:commentId", async (req, res) => {
 app.delete("/comments/:commentId", async (req, res) => {
   try {
     const { ideacollection, commentcollection } = await connectToDatabase();
-    const { ObjectId } = require("mongodb");
     const commentId = req.params.commentId;
     const { ideaId } = req.query;
 
