@@ -1,10 +1,11 @@
 {
   "name": "ideavault-server",
   "version": "1.0.0",
-  "description": "",
+  "description": "IdeaVault REST API (Express + MongoDB) with JWT-protected writes",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "keywords": [],
   "author": "",
@@ -15,8 +16,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "jose-cjs": "^6.2.3",
-    "jsonwebtoken": "^9.0.3",
+    "jose": "^6.2.13",
     "mongodb": "^7.2.0"
   }
 }
